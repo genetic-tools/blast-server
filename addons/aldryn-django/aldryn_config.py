@@ -75,13 +75,20 @@ class Form(forms.BaseForm):
         initial=False,
         help_text=(
             'For example, http://example.com/ rather than '
-            'http://example.com/en/ if en (English) is the default language. '
-            'If multiple languages are configured, this option will be ignored '
-            'for Django versions prior to 1.10.'
+            'http://example.com/en/ if en (English) is the default language.'
         )
+    )
+    session_timeout = forms.NumberField(
+        'Timeout for users session, in seconds.',
+        required=False,
+        initial=(60 * 60 * 24 * 7 * 2),
+        help_text=(
+            'By default it\'s two weeks (django default).'
+        ),
     )
 
     def to_settings(self, data, settings):
+        import django_cache_url
         import dj_database_url
         import warnings
         from functools import partial
@@ -117,6 +124,8 @@ class Form(forms.BaseForm):
                 ),
                 RuntimeWarning,
             )
+        settings['DATABASES']['default'] = dj_database_url.parse(settings['DATABASE_URL'])
+
         if not settings['CACHE_URL']:
             settings['CACHE_URL'] = 'locmem://'
             warnings.warn(
@@ -125,11 +134,9 @@ class Form(forms.BaseForm):
                 ),
                 RuntimeWarning,
             )
-
-        settings['DATABASES']['default'] = dj_database_url.parse(settings['DATABASE_URL'])
+        settings['CACHES']['default'] = django_cache_url.parse(settings['CACHE_URL'])
 
         settings['ROOT_URLCONF'] = env('ROOT_URLCONF', 'urls')
-        settings['ADDON_URLS'].append('aldryn_django.urls')
         settings['ADDON_URLS_I18N'].append('aldryn_django.i18n_urls')
 
         settings['WSGI_APPLICATION'] = 'wsgi.application'
@@ -159,13 +166,13 @@ class Form(forms.BaseForm):
                     'context_processors': [
                         'django.contrib.auth.context_processors.auth',
                         'django.contrib.messages.context_processors.messages',
-                        'django.core.context_processors.i18n',
-                        'django.core.context_processors.debug',
-                        'django.core.context_processors.request',
-                        'django.core.context_processors.media',
-                        'django.core.context_processors.csrf',
-                        'django.core.context_processors.tz',
-                        'django.core.context_processors.static',
+                        'django.template.context_processors.i18n',
+                        'django.template.context_processors.debug',
+                        'django.template.context_processors.request',
+                        'django.template.context_processors.media',
+                        'django.template.context_processors.csrf',
+                        'django.template.context_processors.tz',
+                        'django.template.context_processors.static',
                         'aldryn_django.context_processors.debug',
                     ],
                     'loaders': loader_list_class([
@@ -205,7 +212,6 @@ class Form(forms.BaseForm):
         self.logging_settings(settings, env=env)
         # Order matters, sentry settings rely on logging being configured.
         self.sentry_settings(settings, env=env)
-        self.cache_settings(settings, env=env)
         self.storage_settings_for_media(settings, env=env)
         self.storage_settings_for_static(data, settings, env=env)
         self.email_settings(data, settings, env=env)
@@ -275,6 +281,8 @@ class Form(forms.BaseForm):
             'SECURE_PROXY_SSL_HEADER',
             ('HTTP_X_FORWARDED_PROTO', 'https')
         )
+        s['SESSION_COOKIE_AGE'] = env('SESSION_COOKIE_AGE', data.get('session_timeout') or 60 * 60 * 24 * 7 * 2)
+
         # SESSION_COOKIE_HTTPONLY and SECURE_FRAME_DENY must be False for CMS
         # SESSION_COOKIE_HTTPONLY is handled by
         #   django.contrib.sessions.middleware.SessionMiddleware
@@ -287,23 +295,6 @@ class Form(forms.BaseForm):
             s['MIDDLEWARE_CLASSES'].index('aldryn_sites.middleware.SiteMiddleware') + 1,
             'django.middleware.security.SecurityMiddleware',
         )
-
-        # Add the debreach middlewares to counter CRIME/BREACH attacks.
-        # We always add it even if the GZipMiddleware is not enabled because
-        # we cannot assume that every upstream proxy implements a
-        # countermeasure itself.
-        s['RANDOM_COMMENT_EXCLUDED_VIEWS'] = set([])
-        if 'django.middleware.gzip.GZipMiddleware' in s['MIDDLEWARE_CLASSES']:
-            index = s['MIDDLEWARE_CLASSES'].index('django.middleware.gzip.GZipMiddleware') + 1
-        else:
-            index = 0
-        s['MIDDLEWARE_CLASSES'].insert(index, 'aldryn_django.middleware.RandomCommentExclusionMiddleware')
-        s['MIDDLEWARE_CLASSES'].insert(index, 'debreach.middleware.RandomCommentMiddleware')
-        if 'django.middleware.csrf.CsrfViewMiddleware' in s['MIDDLEWARE_CLASSES']:
-            s['MIDDLEWARE_CLASSES'].insert(
-                s['MIDDLEWARE_CLASSES'].index('django.middleware.csrf.CsrfViewMiddleware'),
-                'debreach.middleware.CSRFCryptMiddleware',
-            )
 
     def server_settings(self, settings, env):
         settings['PORT'] = env('PORT', 80)
@@ -392,12 +383,6 @@ class Form(forms.BaseForm):
                 'level': 'ERROR',
                 'class': 'raven.contrib.django.raven_compat.handlers.SentryHandler',
             }
-
-    def cache_settings(self, settings, env):
-        import django_cache_url
-        cache_url = env('CACHE_URL')
-        if cache_url:
-            settings['CACHES']['default'] = django_cache_url.parse(cache_url)
 
     def storage_settings_for_media(self, settings, env):
         import yurl
@@ -497,23 +482,36 @@ class Form(forms.BaseForm):
     def i18n_settings(self, data, settings, env):
         settings['ALL_LANGUAGES'] = list(settings['LANGUAGES'])
         settings['ALL_LANGUAGES_DICT'] = dict(settings['ALL_LANGUAGES'])
-        languages = [
-            (code, settings['ALL_LANGUAGES_DICT'][code])
-            for code in json.loads(data['languages'])
-        ]
-        settings['LANGUAGE_CODE'] = languages[0][0]
+
         settings['USE_L10N'] = True
         settings['USE_I18N'] = True
-        settings['LANGUAGES'] = languages
+
+        def language_codes_to_tuple(codes):
+            return [
+                (code, settings['ALL_LANGUAGES_DICT'][code])
+                for code in codes
+            ]
+        langs_from_env = env('LANGUAGES', None)
+        lang_codes_from_env = env('LANGUAGE_CODES', None)
+        langs_from_form = json.loads(data['languages'])
+
+        if langs_from_env:
+            settings['LANGUAGES'] = langs_from_env
+        elif lang_codes_from_env:
+            settings['LANGUAGES'] = language_codes_to_tuple(lang_codes_from_env)
+        else:
+            settings['LANGUAGES'] = language_codes_to_tuple(langs_from_form)
+
+        lang_code_from_env = env('LANGUAGE_CODE', None)
+        if lang_code_from_env:
+            settings['LANGUAGE_CODE'] = lang_code_from_env
+        else:
+            settings['LANGUAGE_CODE'] = settings['LANGUAGES'][0][0]
+
         settings['LOCALE_PATHS'] = [
             os.path.join(settings['BASE_DIR'], 'locale'),
         ]
-
-        if len(languages) <= 1:
-            settings['PREFIX_DEFAULT_LANGUAGE'] = not data['disable_default_language_prefix']
-        else:
-            # this is not supported for django versions < 1.10
-            settings['PREFIX_DEFAULT_LANGUAGE'] = True
+        settings['PREFIX_DEFAULT_LANGUAGE'] = not data['disable_default_language_prefix']
 
         if not settings['PREFIX_DEFAULT_LANGUAGE']:
             settings['MIDDLEWARE_CLASSES'].insert(
