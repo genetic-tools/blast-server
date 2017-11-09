@@ -1,24 +1,29 @@
-# -*- coding: utf-8 -*-
+import os
+
+
+INSTALLED_APPS = []
+TEMPLATES = []
+STATICFILES_DIRS = []
 
 INSTALLED_ADDONS = [
     # <INSTALLED_ADDONS>  # Warning: text inside the INSTALLED_ADDONS tags is auto-generated. Manual changes will be overwritten.
     'aldryn-addons',
     'aldryn-django',
     'aldryn-sso',
-    'aldryn-devsync',
     # </INSTALLED_ADDONS>
 ]
 
-import aldryn_addons.settings
+import aldryn_addons.settings  # NOQA
 aldryn_addons.settings.load(locals())
 
 
 # all django settings can be altered here
 
 INSTALLED_APPS.extend([
-    # add your project specific apps here
+    # Third party apps
+    'celeryapp',
+    'django_celery_results',
 ])
 
-MIDDLEWARE_CLASSES.extend([
-    # add your own middlewares here
-])
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', None)
+CELERY_RESULT_BACKEND = 'django-db'

@@ -1,16 +1,53 @@
-web:
- build: .
- links:
-  - "db:postgres"
- ports:
-  - "8000:80"
- volumes:
-  - ".:/app:rw"
-  - "./data:/data:rw"
- command: python manage.py runserver 0.0.0.0:80
- env_file: .env-local
+version: '2.3'
 
-db:
- image: postgres:9.6
- volumes:
-  - ".:/app:rw"
+services:
+  web:
+    build: .
+    ports:
+      - "127.0.0.1:8001:80"
+    links:
+      - "db:postgres"
+      - "rabbitmq:rabbitmq"
+    volumes:
+      - ".:/app:rw"
+      - "./data:/data:rw"
+      - "../../django-adminutils/adminutils:/app/adminutils:ro"
+    env_file: .env-local
+    command: ./manage.py runserver 0.0.0.0:80
+
+  worker:
+    build: .
+    links:
+      - "db:postgres"
+      - "rabbitmq:rabbitmq"
+    volumes:
+      - ".:/app:rw"
+      - "./data:/data:rw"
+      - "../../django-adminutils/adminutils:/app/adminutils:ro"
+    env_file: .env-local
+    command: celery -A celeryapp.app.app --loglevel=INFO worker
+
+  beat:
+    build: .
+    links:
+      - "db:postgres"
+      - "rabbitmq:rabbitmq"
+    volumes:
+      - ".:/app:rw"
+      - "./data:/data:rw"
+      - "../../django-adminutils/adminutils:/app/adminutils:ro"
+    env_file: .env-local
+    command: celery -A celeryapp.app.app beat
+
+  rabbitmq:
+    image: rabbitmq:3.5-management
+    hostname: rabbitmq
+    expose:
+      - "15672"
+    environment:
+      RABBITMQ_ERLANG_COOKIE: "secret cookie here"
+
+  db:
+    image: postgres:9.6
+    volumes:
+      - ".:/app:rw"
